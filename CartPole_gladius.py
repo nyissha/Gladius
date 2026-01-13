@@ -17,22 +17,25 @@ def parse_args():
     
     # Environment & Data
     parser.add_argument("--env", type=str, default="CartPole-v1")
-    parser.add_argument("--data_path", type=str, default="D_CartPole_avg285.npz")
+    parser.add_argument("--data_path", type=str, default="Gladius/D_CartPole_avg285.npz")
     parser.add_argument("--seed", type=int, default=42)
     
     # Training Hyperparameters
     parser.add_argument("--updates", type=int, default=30_000)
-    parser.add_argument("--batch_size", type=int, default=1024) # 배치 사이즈 키움 (Variance 감소)
+    parser.add_argument("--batch_size", type=int, default=64) # 배치 사이즈 키움 (Variance 감소)
     parser.add_argument("--eval_freq", type=int, default=1000)
     
     # Off-GLADIUS Specific Hyperparameters (Tuning)
-    parser.add_argument("--lr_q", type=float, default=5e-5)    # Q는 천천히 학습 (안정성)
+    parser.add_argument("--lr_q", type=float, default=3e-4) # Q는 천천히 학습 (안정성)
+
+    # different parameters compare to SBEED
     parser.add_argument("--lr_zeta", type=float, default=1e-3) # Zeta는 빠르게 학습 (추정 정확도)
-    parser.add_argument("--zeta_steps", type=int, default=10)   # Q 1번 업데이트 당 Zeta 업데이트 횟수
-    
-    parser.add_argument("--lam", type=float, default=0.5)      # Temperature (0.1 ~ 1.0)
+    parser.add_argument("--zeta_steps", type=int, default=20)   # Q 1번 업데이트 당 Zeta 업데이트 횟수
+    # n=1 : divergence, n=5 : divergence, n=10 : convergence under 10000 update, n=20 
+    parser.add_argument("--lam", type=float, default=0.5)   # Temperature (0.1 ~ 1.0)
+
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--grad_clip", type=float, default=0.5) # Gradient Clipping
+    parser.add_argument("--grad_clip", type=float, default=10.0) # Gradient Clipping
 
     return parser.parse_args()
 
@@ -53,7 +56,7 @@ class OfflineReplayBuffer:
         self.obs  = torch.tensor(obs,  dtype=torch.float32, device=DEVICE)
         self.act  = torch.tensor(act,  dtype=torch.int64,   device=DEVICE)
         # Reward Scaling
-        self.rew  = torch.tensor(rew,  dtype=torch.float32, device=DEVICE) * 0.01
+        self.rew  = torch.tensor(rew,  dtype=torch.float32, device=DEVICE) / 100
         self.obs2 = torch.tensor(obs2, dtype=torch.float32, device=DEVICE)
         self.done = torch.tensor(done, dtype=torch.float32, device=DEVICE)
         self.N = len(obs)
@@ -123,14 +126,11 @@ class OfflineGladius:
             obs, act, obs2 = b1["obs"], b1["act"], b1["obs2"]
             
             with torch.no_grad():
-                # Q is fixed in ascent step [cite: 356]
                 next_q = self.q_net(obs2)
-                next_v = get_v_from_q(next_q, self.lam).squeeze(-1) # V^Q(s')
+                next_v = get_v_from_q(next_q, self.lam).squeeze(-1) 
             
             current_zeta = self.zeta_net(obs, act) # zeta(s, a)
-            
-            # Maximize Objective -> Minimize MSE(V, Zeta)
-            # D_theta1 = sum (V(s') - zeta(s,a))^2
+
             zeta_loss = F.mse_loss(current_zeta, next_v)
             
             self.zeta_optimizer.zero_grad()
@@ -162,7 +162,7 @@ class OfflineGladius:
         correction = (self.gamma ** 2) * ((next_v_values - fixed_zeta) ** 2)
         
         # Total Loss (BE loss)
-        q_loss = (td_loss - correction).mean()
+        q_loss = (td_loss - correction).sum()
         
         self.q_optimizer.zero_grad()
         q_loss.backward()

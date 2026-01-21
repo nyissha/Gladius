@@ -87,7 +87,7 @@ class CheckpointCallback(BaseCallback):
                     mean_reward = np.mean(self.reward_history[-20:])
                     
                     # Medium 
-                    if not self.medium_saved and 150 < mean_reward < 200:
+                    if not self.medium_saved and 350 < mean_reward < 400:
                         print(f"\nMedium (Avg: {mean_reward:.1f})")
                         save_path = f"{self.env_id}_medium.pt"
                         save_ppo_actor_as_pt(self.model, save_path, self.obs_dim, self.act_dim)

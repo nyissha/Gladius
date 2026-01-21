@@ -8,6 +8,28 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
+class StochasticTransitionWrapper(gym.Wrapper):
+    def __init__(self, env, noise_scale=0.1, prob_sticky=0.0):
+        super().__init__(env)
+        self.noise_scale = noise_scale  # 상태 전이 노이즈 크기 (Gaussian)
+        self.prob_sticky = prob_sticky  # 엉뚱한 행동을 할 확률 (Sticky Action)
+
+    def step(self, action):
+        # 1. Sticky Action: 일정 확률로 이전 행동이나 랜덤 행동 반복
+        if np.random.rand() < self.prob_sticky:
+            action = self.env.action_space.sample()
+            
+        # 2. 원래 환경의 전이
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        
+        # 3. 상태 전이 노이즈 주입 (Transition Noise)
+        # obs가 결정론적이지 않고 확률적으로 퍼지게 만듦
+        noise = np.random.normal(loc=0, scale=self.noise_scale, size=obs.shape)
+        obs = obs + noise
+        
+        return obs, reward, terminated, truncated, info
+
+
 # 1. Device Setup
 DEVICE = torch.device("cpu")
 
@@ -57,6 +79,7 @@ def load_behavior_model(ckpt_path, obs_dim, act_dim):
 def collect_dataset(cfg: Config):
     set_seed(cfg.seed)
     env = gym.make(cfg.env_id)
+    env = StochasticTransitionWrapper(env, noise_scale=0.1, prob_sticky=0.1)
     
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.n

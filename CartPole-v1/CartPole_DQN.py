@@ -18,7 +18,7 @@ def parse_args():
     
     # Environment & Data
     parser.add_argument("--env", type=str, default="CartPole-v1")
-    parser.add_argument("--data_path", type=str, default="D_CartPole_avg285.npz")
+    parser.add_argument("--data_path", type=str, default="CartPole-v1/D_CartPole_avg285.npz")
     parser.add_argument("--seed", type=int, default=42)
     
     # Training Hyperparameters
@@ -35,7 +35,7 @@ def parse_args():
     # n=1 : divergence, n=5 : divergence, n=10 : convergence under 10000 update, n=20 
     parser.add_argument("--lam", type=float, default=0.0001)   # Temperature (0.1 ~ 1.0)
 
-    parser.add_argument("--tau", type=float, default=0.005)
+    parser.add_argument("--hard_updates", type=int, default=100)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--grad_clip", type=float, default=10.0) # Gradient Clipping
 
@@ -123,7 +123,7 @@ class OfflineDQN:
         self.lam = args.lam
         self.zeta_steps = args.zeta_steps
         self.grad_clip = args.grad_clip
-        self.tau = args.tau
+        self.hard_updates = args.hard_updates
 
         # 1. Initialize Q_theta2, Zeta_theta1
         self.q_net = MLP(obs_dim, act_dim).to(DEVICE)
@@ -139,14 +139,10 @@ class OfflineDQN:
         self.q_scheduler = CosineAnnealingLR(self.q_optimizer, T_max=args.updates)
         self.zeta_scheduler = CosineAnnealingLR(self.zeta_optimizer, T_max=args.updates*args.zeta_steps)
 
-    def soft_update(self, target_net, source_net):
-        for target_param, param in zip(target_net.parameters(), source_net.parameters()):
-            #zip은 두 개 이상의 리스트를 엮어서 튜플로 만든다
-            target_param.data.copy_(
-                target_param.data * (1.0 - self.tau) + param.data * self.tau
-            )
+    def hard_update(self, target_net, source_net):
+        target_net.load_state_dict(source_net.state_dict())
 
-    def update(self, buffer, batch_size):
+    def update(self, buffer, batch_size, i):
         # Algorithm 1: Loop t=1 to T
      
 
@@ -169,7 +165,10 @@ class OfflineDQN:
         nn.utils.clip_grad_norm_(self.q_net.parameters(), self.grad_clip)
         self.q_optimizer.step()
         self.q_scheduler.step()
-        self.soft_update(self.target_q_net, self.q_net)
+
+        if (i % self.hard_updates == 0):
+            self.hard_update(self.target_q_net, self.q_net)
+
         return {"q_loss": q_loss.item(), "zeta_loss": 0}
 
     def select_action(self, obs, deterministic=True):
@@ -273,7 +272,7 @@ def main():
         start_time = time.time()
         for i in range(1, args.updates + 1):
             # buffer를 통째로 넘겨서 내부에서 B1, B2 샘플링
-            logs = agent.update(buffer, args.batch_size)
+            logs = agent.update(buffer, args.batch_size, i)
             
             if i % args.eval_freq == 0:
                 ret = evaluate(env, agent)

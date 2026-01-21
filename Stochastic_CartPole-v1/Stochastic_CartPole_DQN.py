@@ -14,7 +14,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # ===================== 0. Configuration & Setup =====================
 def parse_args():
-    parser = argparse.ArgumentParser(description="Off-GLADIUS Pure Verification")
+    parser = argparse.ArgumentParser(description="Off-DQN Pure Verification")
     
     # Environment & Data
     parser.add_argument("--env", type=str, default="CartPole-v1")
@@ -26,25 +26,25 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=128) # 배치 사이즈 키움 (Variance 감소)
     parser.add_argument("--eval_freq", type=int, default=1000)
     
-    # Off-GLADIUS Specific Hyperparameters (Tuning)
+    # Off-DQN Specific Hyperparameters (Tuning)
     parser.add_argument("--lr_q", type=float, default=3e-3) # Q는 천천히 학습 (안정성)
 
-    # different parameters compare to Gladius
+    # different parameters compare to DQN
     parser.add_argument("--lr_zeta", type=float, default=1e-3) # Zeta는 빠르게 학습 (추정 정확도)
     parser.add_argument("--zeta_steps", type=int, default=20)   # Q 1번 업데이트 당 Zeta 업데이트 횟수
     # n=1 : divergence, n=5 : divergence, n=10 : convergence under 10000 update, n=20 
-    parser.add_argument("--lam", type=float, default=0.5)   # Temperature (0.1 ~ 1.0)
+    parser.add_argument("--lam", type=float, default=0.0001)   # Temperature (0.1 ~ 1.0)
 
-    parser.add_argument("--tau", type=float, default=0.005)
+    parser.add_argument("--hard_updates", type=int, default=100)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--grad_clip", type=float, default=10.0) # Gradient Clipping
 
-    parser.add_argument("--iter", type=int, default=1)
+    parser.add_argument("--iter", type=int, default=5)
     return parser.parse_args()
 
 args = parse_args()
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Running Off-GLADIUS (Pure) on {DEVICE} | Seed: {args.seed}")
+print(f"Running Off-DQN (Pure) on {DEVICE} | Seed: {args.seed}")
 
 def set_seed(seed):
     random.seed(seed)
@@ -116,14 +116,14 @@ def get_v_from_q(q_values, temperature=1.0): #입력 차원 (B, A) // Lazy Eval
     return temperature * torch.logsumexp(q_values / temperature, dim=1, keepdim=True)
     #dim1 즉 action 차원에서 더해서 action 개념을 없애고 상태별 Q값만 남긴다. Keepdim=True로 (B, 1) 형상 유지.
 
-# ===================== 3. Off-GLADIUS Agent =====================
-class OfflineGladius:
+# ===================== 3. Off-DQN Agent =====================
+class OfflineDQN:
     def __init__(self, obs_dim, act_dim, args):
         self.gamma = args.gamma
         self.lam = args.lam
         self.zeta_steps = args.zeta_steps
         self.grad_clip = args.grad_clip
-        self.tau = args.tau
+        self.hard_updates = args.hard_updates
 
         # 1. Initialize Q_theta2, Zeta_theta1
         self.q_net = MLP(obs_dim, act_dim).to(DEVICE)
@@ -139,74 +139,38 @@ class OfflineGladius:
         self.q_scheduler = CosineAnnealingLR(self.q_optimizer, T_max=args.updates)
         self.zeta_scheduler = CosineAnnealingLR(self.zeta_optimizer, T_max=args.updates*args.zeta_steps)
 
-    def soft_update(self, target_net, source_net):
-        for target_param, param in zip(target_net.parameters(), source_net.parameters()):
-            #zip은 두 개 이상의 리스트를 엮어서 튜플로 만든다
-            target_param.data.copy_(
-                target_param.data * (1.0 - self.tau) + param.data * self.tau
-            )
+    def hard_update(self, target_net, source_net):
+        target_net.load_state_dict(source_net.state_dict())
 
-    def update(self, buffer, batch_size):
+    def update(self, buffer, batch_size, i):
         # Algorithm 1: Loop t=1 to T
-        
-        # --- Ascent Step (Update Zeta multiple times for stability) ---
-        zeta_loss_val = 0
-        for _ in range(self.zeta_steps):
-            b1 = buffer.sample(batch_size) # Sample B1 
-            
-            obs, act, obs2 = b1["obs"], b1["act"], b1["obs2"]
-            
-            with torch.no_grad():
-                next_q = self.q_net(obs2)
-                next_v = get_v_from_q(next_q, self.lam).squeeze(-1) 
-            
-            current_zeta = self.zeta_net(obs, act) # zeta(s, a)
+     
 
-            zeta_loss = F.mse_loss(current_zeta, next_v)
-            
-            self.zeta_optimizer.zero_grad()
-            zeta_loss.backward()
-            nn.utils.clip_grad_norm_(self.zeta_net.parameters(), self.grad_clip)
-            self.zeta_optimizer.step()
-            zeta_loss_val = zeta_loss.item()
-            self.zeta_scheduler.step()
-
-
-       # --- Descent Step (Update Q) ---
+        # --- Descent Step (Update Q) ---
         b2 = buffer.sample(batch_size) # Sample B2 
         obs, act, rew, obs2, done = b2["obs"], b2["act"], b2["rew"], b2["obs2"], b2["done"]
         
         with torch.no_grad():
-            fixed_zeta = self.zeta_net(obs, act)
-            next_q_target = self.target_q_net(obs2)
-            next_v_target = get_v_from_q(next_q_target, self.lam).squeeze(-1)        
+            next_q_values = self.target_q_net(obs2)
+            next_v_values = get_v_from_q(next_q_values, self.lam).squeeze(-1)        
 
-        q_values_current = self.q_net(obs)
-        current_q = q_values_current.gather(1, act.long().unsqueeze(-1)).squeeze(-1)
-
-        next_q_current = self.q_net(obs2)
-        next_v_current = get_v_from_q(next_q_current, self.lam).squeeze(-1)
+        q_values = self.q_net(obs)
+        current_q = q_values.gather(1, act.long().unsqueeze(-1)).squeeze(-1)
         
-        # 1. Bellman Operator Estimate: r + gamma * V^Q(s')
-        target_op = rew + self.gamma * next_v_target * (1 - done)
-        
-        # 2. TD Squared Loss: (TQ - Q)^2
-        td_loss = (target_op - current_q) ** 2
-        
-        # 3. Correction Term: gamma^2 * (V^Q(s') - zeta)^2
-        correction = (self.gamma ** 2) * ((next_v_current - fixed_zeta) ** 2)
-        
-        # Total Loss (BE loss)
-        q_loss = (td_loss - correction).mean()
+        target_op = rew + self.gamma * next_v_values * (1 - done)
+        q_loss = ((target_op - current_q) ** 2).mean()
         
         self.q_optimizer.zero_grad()
         q_loss.backward()
         nn.utils.clip_grad_norm_(self.q_net.parameters(), self.grad_clip)
         self.q_optimizer.step()
         self.q_scheduler.step()
-        self.soft_update(self.target_q_net, self.q_net)
-        return {"q_loss": q_loss.item(), "zeta_loss": zeta_loss_val}
-    
+
+        if (i % self.hard_updates == 0):
+            self.hard_update(self.target_q_net, self.q_net)
+
+        return {"q_loss": q_loss.item(), "zeta_loss": 0}
+
     def select_action(self, obs, deterministic=True):
         with torch.no_grad():
             if obs.ndim == 1: obs = obs.unsqueeze(0)
@@ -236,12 +200,12 @@ def evaluate(env, agent, episodes=5):
     agent.q_net.train()
     return float(np.mean(rets))
 
-def visualize_results(Gladius_steps : list[int], Gladius_rets : list[float], q_loss, zeta_loss, args):
+def visualize_results(DQN_steps : list[int], DQN_rets : list[float], q_loss, zeta_loss, args):
     plt.figure(figsize=(10, 6)) #canvas 생성, size는 인치 단위.
 
     try:
-        np_steps = np.array(Gladius_steps).reshape(args.iter, -1)
-        np_rets = np.array(Gladius_rets).reshape(args.iter, -1)
+        np_steps = np.array(DQN_steps).reshape(args.iter, -1)
+        np_rets = np.array(DQN_rets).reshape(args.iter, -1)
     except ValueError:
         print("[Error] 데이터 크기가 맞지 않아 reshape 할 수 없습니다. 실험 도중 중단되었을 수 있습니다.")
         return
@@ -249,7 +213,7 @@ def visualize_results(Gladius_steps : list[int], Gladius_rets : list[float], q_l
     steps_x = np_steps[0]
     
     #for i in range(args.iter):
-       #plt.plot(steps_x, np_rets[i], label='Gladius', color='blue', alpha=0.15)
+       #plt.plot(steps_x, np_rets[i], label='DQN', color='blue', alpha=0.15)
     
     avg_rets = np_rets.mean(axis=0)
     #std_rets = np_rets.std(axis=0)
@@ -258,32 +222,21 @@ def visualize_results(Gladius_steps : list[int], Gladius_rets : list[float], q_l
     data = np.load("results/sbeed_CartPole-v1.npz")
     limit_index = int(args.updates // args.eval_freq)
     
-    plt.subplot(1, 2, 1)
-    plt.plot(data['steps'][:limit_index], data['returns'][:limit_index], label='SBEED (mean)', color='green', linewidth=2)
-    plt.plot(steps_x, avg_rets, label='Gladius (mean)', color='red', linewidth=2)
+    plt.plot(steps_x, avg_rets, label='DQN (mean)', color='red', linewidth=2)
     #plt.fill_between(steps_x, avg_rets - std_rets, clip_rets, color='blue', alpha=0.05)
 
-    plt.title(f"Gladius Performance on {args.env}")
+    plt.title(f"DQN Performance on {args.env}")
     plt.xlabel("Gradient Updates")
     plt.ylabel("Average Episode Reward")
     plt.legend(loc='lower right')
     plt.grid(True, alpha=0.3) 
     plt.tight_layout() # 여백 정리
 
-    plt.subplot(1, 2, 2)
-    plt.plot(steps_x, q_loss, label='q_loss')
-    plt.plot(steps_x, zeta_loss, label='zeta_loss')
-    plt.title("Loss")
-    plt.xlabel("Gradient Updates")
-    plt.ylabel("Loss")
-    plt.legend(loc='lower right')
-    plt.tight_layout() # 여백 정리
-
     save_dir = "./results"
     os.makedirs(save_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") #년월일시분초
-    save_name = f"{save_dir}/Gladius_{args.env}_{timestamp}.png"
-    file_name = f"{save_dir}/Gladius_{args.env}_{timestamp}.npz"
+    save_name = f"{save_dir}/DQN_{args.env}_{timestamp}.png"
+    file_name = f"{save_dir}/DQN_{args.env}_{timestamp}.npz"
 
     plt.savefig(save_name, dpi=300)
     np.savez_compressed(file_name, steps=steps_x, returns=avg_rets)
@@ -308,18 +261,18 @@ def main():
     
     steps, rets = [], []
     q_loss, zeta_loss = [], []
-    print("===================== Start Off-GLADIUS (Pure) Verification =====================")
+    print("===================== Start Off-DQN (Pure) Verification =====================")
     for iter in range(args.iter):
         seed = args.seed + iter
         set_seed(seed)
-        agent = OfflineGladius(obs_dim, act_dim, args)
+        agent = OfflineDQN(obs_dim, act_dim, args)
 
         print(f"-- Run {iter+1}/{args.iter}")
         
         start_time = time.time()
         for i in range(1, args.updates + 1):
             # buffer를 통째로 넘겨서 내부에서 B1, B2 샘플링
-            logs = agent.update(buffer, args.batch_size)
+            logs = agent.update(buffer, args.batch_size, i)
             
             if i % args.eval_freq == 0:
                 ret = evaluate(env, agent)

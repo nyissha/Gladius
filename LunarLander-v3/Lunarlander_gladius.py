@@ -24,18 +24,18 @@ def parse_args():
 
     # Training Hyperparameters
     parser.add_argument("--updates", type=int, default=50_000)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--eval_freq", type=int, default=1000)
 
     # Off-GLADIUS Specific Hyperparameters
-    parser.add_argument("--lr_q", type=float, default=1e-4)
+    parser.add_argument("--lr_q", type=float, default=3e-5)
     parser.add_argument("--lr_zeta", type=float, default=1e-3)
-    parser.add_argument("--zeta_steps", type=int, default=20)
-    parser.add_argument("--lam", type=float, default=0.1) 
+    parser.add_argument("--zeta_steps", type=int, default=50)
+    parser.add_argument("--lam", type=float, default=1.0) 
 
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--grad_clip", type=float, default=10.0)
+    parser.add_argument("--grad_clip", type=float, default=1.0)
 
     parser.add_argument("--iter", type=int, default=1)
 
@@ -62,18 +62,12 @@ class OfflineReplayBuffer:
         act = data_dict["act"]
         rew = data_dict["rew"]
         obs2 = data_dict["obs2"]    
-        raw_done = data_dict["done"] # 섞여있는 done
+        raw_done = data_dict["done"] 
 
-        # [핵심] LunarLander Heuristic: 보상 크기로 구분
-        # 보상의 절대값이 50보다 크면 '진짜 끝(Terminated)'으로 간주
-        # 50은 넉넉하게 잡은 기준값입니다 (보통 성공/실패는 100점 내외이므로)
+       
         is_terminated = (np.abs(rew) > 50.0) & (raw_done == 1.0)
-        
-        # truncated는 done이 1인데 terminated가 아닌 경우 (사실 이 변수는 학습엔 안 쓰임)
         is_truncated = (raw_done == 1.0) & (np.abs(rew) <= 50.0)
 
-        # 이제 우리가 필요한 건 'Terminated' 정보뿐입니다.
-        # 시간 초과(truncated)된 데이터는 done=0으로 취급하여 V(s')를 계산하게 만듭니다.
         final_done = is_terminated.astype(np.float32)
         '''
         if "done" in data_dict:

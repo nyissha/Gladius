@@ -1,0 +1,135 @@
+import os, random
+from dataclasses import dataclass
+from collections import defaultdict
+import numpy as np
+import gymnasium as gym
+import torch, torch.nn as nn
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+
+# GPU
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+# Q-Network
+class QNetwork(nn.Module):
+    def __init__(self, obs_dim, act_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim,128), nn.ReLU(),
+            nn.Linear(128,128), nn.ReLU(),
+            nn.Linear(128,act_dim)
+        )
+    def forward(self,x): return self.net(x)
+
+# Config
+@dataclass # __init__, __repr__ (촐력포맷), __eq__ (비교 연산) 자동으로 지원
+class Config:
+    env_id: str = "LunarLander-v3"
+    seed: int = 1
+    ckpt_path: str = "ddqn_perfect_lunarlander.pt"
+    total_steps: int = 1_000_000
+    greedy_ratio: float = 0.7
+    random_ratio: float = 0.3
+    log_interval: int = 100_000
+
+# Model loader
+def load_behavior_model(ckpt_path):
+    env=gym.make("LunarLander-v3")
+    obs_dim=env.observation_space.shape[0]
+    act_dim=env.action_space.n
+    env.close()
+
+    q_net=QNetwork(obs_dim,act_dim).to(DEVICE)
+    ckpt=torch.load(ckpt_path,map_location=DEVICE) #압축된 파일 복구, 현 디바이스로 텐서를 변환해서 로딩.
+
+    if isinstance(ckpt,dict) and "q" in ckpt: #파이썬은 앞의 isinstance가 False인 경우 뒷 조건을 보지 않고 넘어간다. ckpt가 dict가 아닌데 뒷 코드 실행 시 오류가 날 수 있다.
+        q_net.load_state_dict(ckpt["q"])
+    else:
+        q_net.load_state_dict(ckpt)
+
+    q_net.eval()
+    return q_net
+
+# Dataset collector
+def collect_dataset(cfg: Config):
+    set_seed(cfg.seed)
+    env=gym.make(cfg.env_id)
+    obs,_=env.reset()
+
+    q_model = load_behavior_model(cfg.ckpt_path)
+
+    data=defaultdict(list)
+    ep_returns=[]
+    ep_ret=0.0
+
+    for t in range(cfg.total_steps):
+        if np.random.rand() < cfg.random_ratio:
+            act = env.action_space.sample()  # 30% random
+        else:
+            obs_t = torch.tensor(obs, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+            act = int(torch.argmax(q_model(obs_t), dim=1).item())  # 70% greedy
+
+        next_obs,r,terminated,truncated,_=env.step(act)
+        done=terminated or truncated
+        ep_ret+=r
+
+        data["obs"].append(obs)
+        data["act"].append(act)
+        data["rew"].append(r)
+        data["obs2"].append(next_obs)
+        data["terminated"].append(terminated)
+        data["truncated"].append(truncated)
+        data["done"].append(done)
+
+        obs = next_obs
+
+        if done:
+            ep_returns.append(ep_ret)
+            ep_ret = 0.0
+            obs,_=env.reset()
+
+        if (t+1) % cfg.log_interval == 0:
+            print(f"{t+1} / {cfg.total_steps} collected")
+
+    env.close()
+
+    return data, ep_returns
+
+# Main
+if __name__=="__main__":
+    cfg=Config(env_id="LunarLander-v3",seed=1,ckpt_path="ddqn_perfect_lunarlander.pt")
+    d, ep_rets = collect_dataset(cfg)
+
+    dataset={
+        "obs": np.array(d["obs"],np.float32),
+        "act": np.array(d["act"],np.int64),
+        "rew": np.array(d["rew"],np.float32),
+        "obs2": np.array(d["obs2"],np.float32),
+        "done": np.array(d["done"],np.float32),
+        "terminated": np.array(d["terminated"],np.float32),
+        "truncated": np.array(d["truncated"],np.float32),
+        "episode_returns": np.array(ep_rets,np.float32)
+    }
+
+    save_name="D_lunarlander_expert_1m.npz"
+    np.savez_compressed(save_name,**dataset)
+
+    print("Dataset saved:",save_name)
+    print("Transitions:",len(dataset["obs"]))
+    print("Episode return mean:",np.mean(dataset["episode_returns"]))
+    print("Episode return std :",np.std(dataset["episode_returns"]))
+
+    plt.plot(dataset["episode_returns"])
+    plt.xlabel("Episode")
+    plt.ylabel("Return")
+    plt.title("LunarLander Mixed Dataset")
+    plt.grid(True)
+    plt.show()

@@ -20,18 +20,18 @@ def parse_args():
     # Environment & Data
     parser.add_argument("--env", type=str, default="LunarLander-v3")
     parser.add_argument("--data_path", type=str, default="LunarLander-v3/D_LunarLander_medium_mixed_high_100_9_1.npz")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=43)
 
     # Training Hyperparameters
     parser.add_argument("--updates", type=int, default=50_000)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--eval_freq", type=int, default=1000)
 
     # Off-GLADIUS Specific Hyperparameters
-    parser.add_argument("--lr_q", type=float, default=3e-5)
+    parser.add_argument("--lr_q", type=float, default=7e-6)
     parser.add_argument("--lr_zeta", type=float, default=1e-3)
     parser.add_argument("--zeta_steps", type=int, default=50)
-    parser.add_argument("--lam", type=float, default=1.0) 
+    parser.add_argument("--lam", type=float, default=0.5) 
 
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -62,11 +62,11 @@ class OfflineReplayBuffer:
         act = data_dict["act"]
         rew = data_dict["rew"]
         obs2 = data_dict["obs2"]    
-        raw_done = data_dict["done"] 
+        raw_done = data_dict["done"]
 
        
         is_terminated = (np.abs(rew) > 50.0) & (raw_done == 1.0)
-        is_truncated = (raw_done == 1.0) & (np.abs(rew) <= 50.0)
+        #is_truncated = (raw_done == 1.0) & (np.abs(rew) <= 50.0)
 
         final_done = is_terminated.astype(np.float32)
         '''
@@ -82,9 +82,10 @@ class OfflineReplayBuffer:
         '''
         self.obs  = torch.tensor(obs,  dtype=torch.float32, device=DEVICE)
         self.act  = torch.tensor(act,  dtype=torch.int64,   device=DEVICE)
-        self.rew  = torch.tensor(rew,  dtype=torch.float32, device=DEVICE) * reward_scale
+        self.rew  = torch.tensor(rew,  dtype=torch.float32, device=DEVICE)
+        self.rew  = torch.sign(self.rew) * torch.log(1.0 + torch.abs(self.rew))
         self.obs2 = torch.tensor(obs2, dtype=torch.float32, device=DEVICE)
-        self.done = torch.tensor(final_done, dtype=torch.float32, device=DEVICE)
+        self.done = torch.tensor(raw_done, dtype=torch.float32, device=DEVICE)
         self.N = len(obs)
         print(f"[Buffer] Loaded transitions: {self.N}")
 
